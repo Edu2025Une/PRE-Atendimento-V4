@@ -9,6 +9,8 @@ import {
   fetchMessages,
   sendTextMessage,
   sendMediaMessage,
+  sendToNumber,
+  sendBulkMessages,
   type Contact,
   type Chat,
   type Message,
@@ -22,6 +24,10 @@ function getContactName(c: Contact) {
 function getContactPhone(c: Contact) {
   const jid = c.remoteJid ?? c.id ?? "";
   return jid.replace(/@.*$/, "").replace(/^(\d+)$/, "+$1") || (c.phone ?? "—");
+}
+function getContactNumber(c: Contact) {
+  const jid = c.remoteJid ?? c.id ?? "";
+  return jid.replace(/@.*$/, "") || (c.phone ?? "");
 }
 function getChatName(ch: Chat) {
   return ch.pushName ?? ch.name ?? ch.remoteJid ?? "Chat";
@@ -74,9 +80,25 @@ function initials(name: string) {
     .join("")
     .toUpperCase();
 }
-
 function isNoConfigError(msg: string) {
   return msg.toLowerCase().includes("configure sua evolution") || msg.toLowerCase().includes("evolution api antes");
+}
+
+function exportContactsCSV(contacts: Contact[]) {
+  const header = ["Nome", "Número", "JID"];
+  const rows = contacts.map((c) => [
+    `"${getContactName(c).replace(/"/g, '""')}"`,
+    `"${getContactPhone(c)}"`,
+    `"${c.remoteJid ?? c.id ?? ""}"`,
+  ]);
+  const csv = [header.join(","), ...rows.map((r) => r.join(","))].join("\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `contatos_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function Contatos() {
@@ -93,6 +115,25 @@ export default function Contatos() {
   const [searchResults, setSearchResults] = useState<Contact[] | null>(null);
   const [searching, setSearching] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Multi-select ──────────────────────────────────────────
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // ── Bulk send modal ───────────────────────────────────────
+  const [bulkModal, setBulkModal] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkSending, setBulkSending] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{ sent: number; failed: number } | null>(null);
+  const [bulkError, setBulkError] = useState("");
+
+  // ── Nova mensagem modal ───────────────────────────────────
+  const [newMsgModal, setNewMsgModal] = useState(false);
+  const [newMsgNumber, setNewMsgNumber] = useState("");
+  const [newMsgText, setNewMsgText] = useState("");
+  const [newMsgSending, setNewMsgSending] = useState(false);
+  const [newMsgError, setNewMsgError] = useState("");
+  const [newMsgSuccess, setNewMsgSuccess] = useState(false);
 
   // ── Chats ─────────────────────────────────────────────────
   const [chats, setChats] = useState<Chat[]>([]);
@@ -174,6 +215,74 @@ export default function Contatos() {
     }, 400);
   }, [token]);
 
+  // ── Toggle select mode ────────────────────────────────────
+  function toggleSelectMode() {
+    setSelectMode((v) => !v);
+    setSelectedIds(new Set());
+  }
+
+  function toggleSelectContact(c: Contact) {
+    const id = c.remoteJid ?? c.id ?? getContactPhone(c);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    const displayed = searchResults ?? contacts;
+    const ids = displayed.map((c) => c.remoteJid ?? c.id ?? getContactPhone(c));
+    setSelectedIds(new Set(ids));
+  }
+
+  function deselectAll() {
+    setSelectedIds(new Set());
+  }
+
+  // ── Bulk send ─────────────────────────────────────────────
+  async function handleBulkSend() {
+    if (!bulkText.trim() || selectedIds.size === 0) return;
+    setBulkSending(true);
+    setBulkError("");
+    setBulkResult(null);
+    try {
+      const numbers = Array.from(selectedIds).map((id) => id.replace(/@.*$/, ""));
+      const result = await sendBulkMessages(token, numbers, bulkText.trim());
+      setBulkResult({ sent: result.sent, failed: result.failed });
+      setBulkText("");
+      if (result.failed === 0) {
+        setTimeout(() => { setBulkModal(false); setBulkResult(null); setSelectMode(false); setSelectedIds(new Set()); }, 1500);
+      }
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setBulkError(err.message ?? "Erro ao enviar mensagens.");
+    } finally {
+      setBulkSending(false);
+    }
+  }
+
+  // ── Nova mensagem ─────────────────────────────────────────
+  async function handleNewMsg() {
+    if (!newMsgNumber.trim() || !newMsgText.trim()) return;
+    setNewMsgSending(true);
+    setNewMsgError("");
+    setNewMsgSuccess(false);
+    try {
+      await sendToNumber(token, newMsgNumber.trim(), newMsgText.trim());
+      setNewMsgSuccess(true);
+      setNewMsgNumber("");
+      setNewMsgText("");
+      setTimeout(() => { setNewMsgModal(false); setNewMsgSuccess(false); }, 1500);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setNewMsgError(err.message ?? "Erro ao enviar mensagem.");
+    } finally {
+      setNewMsgSending(false);
+    }
+  }
+
   // ── Open chat → load messages ─────────────────────────────
   async function openChat(chat: Chat) {
     setActiveChat(chat);
@@ -205,7 +314,6 @@ export default function Contatos() {
     try {
       await sendTextMessage(token, chatId, msgText.trim());
       setMsgText("");
-      // Append optimistic message
       const newMsg: Message = {
         key: { fromMe: true, remoteJid: chatId, id: `local_${Date.now()}` },
         message: { conversation: msgText.trim() },
@@ -228,7 +336,6 @@ export default function Contatos() {
       const reader = new FileReader();
       reader.onload = () => {
         const result = reader.result as string;
-        // Remove the data:<mime>;base64, prefix
         resolve(result.split(",")[1] ?? result);
       };
       reader.onerror = reject;
@@ -241,7 +348,6 @@ export default function Contatos() {
     const file = e.target.files?.[0];
     if (!file || !activeChat) return;
     e.target.value = "";
-
     const chatId = getChatId(activeChat);
     let mediatype: "image" | "video" | "document" = "document";
     if (type === "media") {
@@ -249,14 +355,12 @@ export default function Contatos() {
       else if (file.type.startsWith("video/")) mediatype = "video";
       else mediatype = "document";
     }
-
     setSendingMsg(true);
     setSendError("");
     try {
       const base64 = await fileToBase64(file);
       await sendMediaMessage(token, chatId, mediatype, base64, file.type, file.name, msgText.trim());
       setMsgText("");
-      // Append optimistic message
       const label = mediatype === "image" ? "📷 Imagem" : mediatype === "video" ? "🎬 Vídeo" : `📄 ${file.name}`;
       const newMsg: Message = {
         key: { fromMe: true, remoteJid: chatId, id: `local_${Date.now()}` },
@@ -274,7 +378,7 @@ export default function Contatos() {
     }
   }
 
-  // ── Filtered chats (search) ───────────────────────────────
+  // ── Filtered chats ────────────────────────────────────────
   const filteredChats = chatSearch.trim()
     ? chats.filter((ch) =>
         getChatName(ch).toLowerCase().includes(chatSearch.toLowerCase()) ||
@@ -282,7 +386,6 @@ export default function Contatos() {
       )
     : chats;
 
-  // ── Displayed contacts ────────────────────────────────────
   const displayedContacts = searchResults ?? contacts;
 
   const noConfig = isNoConfigError(contactsError) || isNoConfigError(chatsError);
@@ -314,11 +417,117 @@ export default function Contatos() {
 
   return (
     <AppShell>
+      {/* ── Nova Mensagem Modal ─────────────────────────────── */}
+      {newMsgModal && (
+        <div className="modal-overlay" onClick={() => { if (!newMsgSending) { setNewMsgModal(false); setNewMsgError(""); setNewMsgSuccess(false); } }}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">✉️ Nova Mensagem</h2>
+              <button className="modal-close" onClick={() => { setNewMsgModal(false); setNewMsgError(""); setNewMsgSuccess(false); }}>✕</button>
+            </div>
+            {newMsgSuccess ? (
+              <div className="modal-success">✅ Mensagem enviada com sucesso!</div>
+            ) : (
+              <>
+                <div className="modal-field">
+                  <label className="modal-label">Número do WhatsApp</label>
+                  <input
+                    className="modal-input"
+                    type="tel"
+                    placeholder="Ex: 5511999999999"
+                    value={newMsgNumber}
+                    onChange={(e) => setNewMsgNumber(e.target.value)}
+                    disabled={newMsgSending}
+                  />
+                  <span className="modal-hint">Código do país + DDD + número (apenas dígitos)</span>
+                </div>
+                <div className="modal-field">
+                  <label className="modal-label">Mensagem</label>
+                  <textarea
+                    className="modal-textarea"
+                    placeholder="Digite sua mensagem…"
+                    rows={4}
+                    value={newMsgText}
+                    onChange={(e) => setNewMsgText(e.target.value)}
+                    disabled={newMsgSending}
+                  />
+                </div>
+                {newMsgError && <div className="modal-error">{newMsgError}</div>}
+                <div className="modal-actions">
+                  <button className="btn-ghost" onClick={() => { setNewMsgModal(false); setNewMsgError(""); }} disabled={newMsgSending}>
+                    Cancelar
+                  </button>
+                  <button
+                    className="btn-primary"
+                    onClick={() => void handleNewMsg()}
+                    disabled={newMsgSending || !newMsgNumber.trim() || !newMsgText.trim()}
+                  >
+                    {newMsgSending ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Enviando…</> : "Enviar"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Envio em Massa Modal ────────────────────────────── */}
+      {bulkModal && (
+        <div className="modal-overlay" onClick={() => { if (!bulkSending) { setBulkModal(false); setBulkError(""); setBulkResult(null); } }}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">📢 Envio em Massa</h2>
+              <button className="modal-close" onClick={() => { setBulkModal(false); setBulkError(""); setBulkResult(null); }}>✕</button>
+            </div>
+            <div className="modal-info">
+              <strong>{selectedIds.size}</strong> contato(s) selecionado(s)
+            </div>
+            {bulkResult ? (
+              <div className={bulkResult.failed === 0 ? "modal-success" : "modal-partial"}>
+                ✅ {bulkResult.sent} enviado(s) &nbsp;{bulkResult.failed > 0 && <span>❌ {bulkResult.failed} falhou(ram)</span>}
+              </div>
+            ) : (
+              <>
+                <div className="modal-field">
+                  <label className="modal-label">Mensagem a enviar para todos</label>
+                  <textarea
+                    className="modal-textarea"
+                    placeholder="Digite a mensagem que será enviada para todos os contatos selecionados…"
+                    rows={5}
+                    value={bulkText}
+                    onChange={(e) => setBulkText(e.target.value)}
+                    disabled={bulkSending}
+                  />
+                </div>
+                {bulkError && <div className="modal-error">{bulkError}</div>}
+                <div className="modal-actions">
+                  <button className="btn-ghost" onClick={() => { setBulkModal(false); setBulkError(""); }} disabled={bulkSending}>
+                    Cancelar
+                  </button>
+                  <button
+                    className="btn-primary"
+                    onClick={() => void handleBulkSend()}
+                    disabled={bulkSending || !bulkText.trim() || selectedIds.size === 0}
+                  >
+                    {bulkSending
+                      ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Enviando…</>
+                      : `Enviar para ${selectedIds.size} contato(s)`}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="page-title-row">
         <div>
           <h1 className="page-title">Contatos & Conversas</h1>
           <p className="page-subtitle">Gerencie seus contatos e histórico de conversas do WhatsApp.</p>
         </div>
+        <button className="btn-primary" onClick={() => { setNewMsgModal(true); setNewMsgError(""); setNewMsgSuccess(false); }}>
+          ✉️ Nova Mensagem
+        </button>
       </div>
 
       {/* Tabs */}
@@ -337,18 +546,18 @@ export default function Contatos() {
         </button>
       </div>
 
-      {/* ═══════════════════════════════════════════════════ */}
-      {/* CONTATOS TAB                                        */}
-      {/* ═══════════════════════════════════════════════════ */}
+      {/* ══════════════════════════════════════════════════════ */}
+      {/* CONTATOS TAB                                          */}
+      {/* ══════════════════════════════════════════════════════ */}
       {tab === "contatos" && (
         <section className="admin-section">
-          {/* Search bar */}
+          {/* Search + action bar */}
           <div className="contacts-search-bar">
             <div className="search-input-wrap">
               <span className="search-icon">🔍</span>
               <input
                 type="search"
-                placeholder="Buscar contato por nome ou número…"
+                placeholder="Buscar por nome ou número…"
                 value={searchQ}
                 onChange={(e) => handleSearchChange(e.target.value)}
                 className="contacts-search-input"
@@ -358,14 +567,45 @@ export default function Contatos() {
                 <button className="search-clear" onClick={() => { setSearchQ(""); setSearchResults(null); }}>✕</button>
               )}
             </div>
-            <button
-              className="btn-ghost sm"
-              onClick={() => loadContacts(token)}
-              disabled={loadingContacts}
-            >
-              ↺ Atualizar
-            </button>
+            <div className="contacts-actions">
+              <button className="btn-ghost sm" onClick={() => loadContacts(token)} disabled={loadingContacts} title="Atualizar">
+                ↺ Atualizar
+              </button>
+              <button
+                className="btn-ghost sm"
+                onClick={() => exportContactsCSV(displayedContacts)}
+                disabled={displayedContacts.length === 0}
+                title="Exportar CSV"
+              >
+                ⬇ CSV
+              </button>
+              <button
+                className={`btn-ghost sm${selectMode ? " active-select" : ""}`}
+                onClick={toggleSelectMode}
+                title={selectMode ? "Cancelar seleção" : "Selecionar contatos"}
+              >
+                {selectMode ? "✕ Cancelar" : "☑ Selecionar"}
+              </button>
+            </div>
           </div>
+
+          {/* Selection toolbar */}
+          {selectMode && (
+            <div className="bulk-toolbar">
+              <div className="bulk-toolbar-left">
+                <span className="bulk-count">{selectedIds.size} selecionado(s)</span>
+                <button className="bulk-link" onClick={selectAll}>Selecionar todos ({displayedContacts.length})</button>
+                {selectedIds.size > 0 && <button className="bulk-link" onClick={deselectAll}>Limpar seleção</button>}
+              </div>
+              <button
+                className="btn-primary sm"
+                disabled={selectedIds.size === 0}
+                onClick={() => { setBulkModal(true); setBulkText(""); setBulkError(""); setBulkResult(null); }}
+              >
+                📢 Enviar em massa ({selectedIds.size})
+              </button>
+            </div>
+          )}
 
           {searchResults !== null && (
             <div className="contacts-search-info">
@@ -386,8 +626,24 @@ export default function Contatos() {
               {displayedContacts.map((c, i) => {
                 const name = getContactName(c);
                 const phone = getContactPhone(c);
+                const uid = c.remoteJid ?? c.id ?? phone;
+                const isSelected = selectedIds.has(uid);
                 return (
-                  <div key={i} className="contact-card">
+                  <div
+                    key={i}
+                    className={`contact-card${selectMode ? " selectable" : ""}${isSelected ? " selected" : ""}`}
+                    onClick={selectMode ? () => toggleSelectContact(c) : undefined}
+                  >
+                    {selectMode && (
+                      <div className="contact-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectContact(c)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </div>
+                    )}
                     <div className="contact-avatar">
                       {c.profilePictureUrl
                         ? <img src={c.profilePictureUrl} alt={name} className="contact-avatar-img" />
@@ -398,21 +654,35 @@ export default function Contatos() {
                       <div className="contact-name">{name}</div>
                       <div className="contact-phone">{phone}</div>
                     </div>
-                    <button
-                      className="btn-ghost sm contact-chat-btn"
-                      title="Abrir conversa"
-                      onClick={() => {
-                        const remoteJid = c.remoteJid ?? c.id ?? "";
-                        const fakeChat: Chat = {
-                          remoteJid,
-                          pushName: name,
-                        };
-                        setTab("conversas");
-                        openChat(fakeChat);
-                      }}
-                    >
-                      💬
-                    </button>
+                    {!selectMode && (
+                      <div className="contact-card-actions">
+                        <button
+                          className="btn-ghost sm contact-chat-btn"
+                          title="Abrir conversa"
+                          onClick={() => {
+                            const remoteJid = c.remoteJid ?? c.id ?? "";
+                            const fakeChat: Chat = { remoteJid, pushName: name };
+                            setTab("conversas");
+                            openChat(fakeChat);
+                          }}
+                        >
+                          💬
+                        </button>
+                        <button
+                          className="btn-ghost sm contact-chat-btn"
+                          title="Enviar mensagem"
+                          onClick={() => {
+                            setNewMsgNumber(getContactNumber(c));
+                            setNewMsgText("");
+                            setNewMsgError("");
+                            setNewMsgSuccess(false);
+                            setNewMsgModal(true);
+                          }}
+                        >
+                          ✉️
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -421,9 +691,9 @@ export default function Contatos() {
         </section>
       )}
 
-      {/* ═══════════════════════════════════════════════════ */}
-      {/* CONVERSAS TAB                                       */}
-      {/* ═══════════════════════════════════════════════════ */}
+      {/* ══════════════════════════════════════════════════════ */}
+      {/* CONVERSAS TAB                                         */}
+      {/* ══════════════════════════════════════════════════════ */}
       {tab === "conversas" && (
         <div className="chats-layout">
           {/* Chat list */}
@@ -512,10 +782,18 @@ export default function Contatos() {
                       : <span>{initials(getChatName(activeChat))}</span>
                     }
                   </div>
-                  <div>
+                  <div style={{ flex: 1 }}>
                     <div className="messages-header-name">{getChatName(activeChat)}</div>
                     <div className="messages-header-sub">{getChatId(activeChat).replace(/@.*$/, "")}</div>
                   </div>
+                  <button
+                    className="btn-ghost sm"
+                    title="Recarregar mensagens"
+                    onClick={() => openChat(activeChat)}
+                    disabled={loadingMessages}
+                  >
+                    ↺
+                  </button>
                 </div>
 
                 <div className="messages-body">
@@ -534,10 +812,7 @@ export default function Contatos() {
                         const text = getMsgText(m);
                         const ts = m.messageTimestamp as number | undefined;
                         return (
-                          <div
-                            key={i}
-                            className={`message-bubble${fromMe ? " from-me" : " from-them"}`}
-                          >
+                          <div key={i} className={`message-bubble${fromMe ? " from-me" : " from-them"}`}>
                             <div className="message-text">{text || <em>Mídia</em>}</div>
                             {ts && <div className="message-ts">{formatTs(ts)}</div>}
                           </div>
@@ -557,53 +832,25 @@ export default function Contatos() {
                     </div>
                   )}
                   <div className="compose-row">
-                    {/* Hidden file inputs */}
-                    <input
-                      ref={fileDocRef}
-                      type="file"
-                      accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv"
-                      style={{ display: "none" }}
-                      onChange={(e) => handleFileSelected(e, "doc")}
-                    />
-                    <input
-                      ref={fileMediaRef}
-                      type="file"
-                      accept="image/*,video/*"
-                      style={{ display: "none" }}
-                      onChange={(e) => handleFileSelected(e, "media")}
-                    />
+                    <input ref={fileDocRef} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv" style={{ display: "none" }} onChange={(e) => handleFileSelected(e, "doc")} />
+                    <input ref={fileMediaRef} type="file" accept="image/*,video/*" style={{ display: "none" }} onChange={(e) => handleFileSelected(e, "media")} />
 
-                    {/* Attach button + menu */}
                     <div className="compose-attach-wrap">
-                      <button
-                        className="compose-attach-btn"
-                        title="Anexar"
-                        disabled={sendingMsg}
-                        onClick={(e) => { e.stopPropagation(); setAttachMenuOpen((v) => !v); }}
-                      >
+                      <button className="compose-attach-btn" title="Anexar" disabled={sendingMsg} onClick={(e) => { e.stopPropagation(); setAttachMenuOpen((v) => !v); }}>
                         +
                       </button>
                       {attachMenuOpen && (
                         <div className="compose-attach-menu" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            className="compose-attach-item"
-                            onClick={() => { setAttachMenuOpen(false); fileDocRef.current?.click(); }}
-                          >
-                            <span className="compose-attach-icon">📄</span>
-                            Documento
+                          <button className="compose-attach-item" onClick={() => { setAttachMenuOpen(false); fileDocRef.current?.click(); }}>
+                            <span className="compose-attach-icon">📄</span>Documento
                           </button>
-                          <button
-                            className="compose-attach-item"
-                            onClick={() => { setAttachMenuOpen(false); fileMediaRef.current?.click(); }}
-                          >
-                            <span className="compose-attach-icon">🖼️</span>
-                            Fotos e Vídeos
+                          <button className="compose-attach-item" onClick={() => { setAttachMenuOpen(false); fileMediaRef.current?.click(); }}>
+                            <span className="compose-attach-icon">🖼️</span>Fotos e Vídeos
                           </button>
                         </div>
                       )}
                     </div>
 
-                    {/* Text input */}
                     <textarea
                       ref={composeRef}
                       className="compose-input"
@@ -624,13 +871,7 @@ export default function Contatos() {
                       }}
                     />
 
-                    {/* Send button */}
-                    <button
-                      className="compose-send-btn"
-                      disabled={sendingMsg || !msgText.trim()}
-                      onClick={() => void handleSendText()}
-                      title="Enviar"
-                    >
+                    <button className="compose-send-btn" disabled={sendingMsg || !msgText.trim()} onClick={() => void handleSendText()} title="Enviar">
                       {sendingMsg
                         ? <span className="spinner" style={{ width: 18, height: 18, borderWidth: 2 }} />
                         : <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>

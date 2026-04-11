@@ -272,6 +272,25 @@ export async function sendTextMessage(token: string, chatId: string, text: strin
   );
 }
 
+export async function sendToNumber(token: string, number: string, text: string) {
+  return request<unknown>("/messages/send-to-number", {
+    method: "POST",
+    body: JSON.stringify({ number, text }),
+  }, token);
+}
+
+export interface BulkResult {
+  sent: number;
+  failed: number;
+  results: { number: string; ok: boolean; error?: string }[];
+}
+export async function sendBulkMessages(token: string, numbers: string[], text: string) {
+  return request<BulkResult>("/messages/send-bulk", {
+    method: "POST",
+    body: JSON.stringify({ numbers, text }),
+  }, token);
+}
+
 export async function sendMediaMessage(
   token: string,
   chatId: string,

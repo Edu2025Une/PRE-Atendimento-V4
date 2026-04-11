@@ -278,6 +278,81 @@ router.post("/messages/send", async (req, res) => {
   }
 });
 
+// ── Send bulk text messages ───────────────────────────────
+router.post("/messages/send-bulk", async (req, res) => {
+  const cfg = await getUserCfg(req.jwtUser!.id, res);
+  if (!cfg) return;
+
+  const { numbers, text } = req.body as { numbers?: string[]; text?: string };
+  if (!Array.isArray(numbers) || numbers.length === 0 || !text?.trim()) {
+    res.status(400).json({ message: "numbers (array) e text são obrigatórios." });
+    return;
+  }
+  if (numbers.length > 100) {
+    res.status(400).json({ message: "Máximo de 100 destinatários por vez." });
+    return;
+  }
+
+  const results: { number: string; ok: boolean; error?: string }[] = [];
+
+  for (const raw of numbers) {
+    const number = String(raw).replace(/@.*$/, "").trim();
+    if (!number) { results.push({ number: raw, ok: false, error: "Número inválido." }); continue; }
+    try {
+      const { ok, status, data } = await evoFetch(
+        `${cfg.url}/message/sendText/${cfg.instanceName}`,
+        cfg.apiKey,
+        "POST",
+        { number, text: text.trim() },
+      );
+      if (ok) {
+        results.push({ number, ok: true });
+      } else {
+        results.push({ number, ok: false, error: extractEvoError(data, status) });
+      }
+    } catch {
+      results.push({ number, ok: false, error: "Falha ao conectar à Evolution API." });
+    }
+    // Small delay to avoid flooding the API
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  const sent = results.filter((r) => r.ok).length;
+  const failed = results.filter((r) => !r.ok).length;
+  res.json({ sent, failed, results });
+});
+
+// ── Send message to any number ────────────────────────────
+router.post("/messages/send-to-number", async (req, res) => {
+  const cfg = await getUserCfg(req.jwtUser!.id, res);
+  if (!cfg) return;
+
+  const { number, text } = req.body as { number?: string; text?: string };
+  if (!number?.trim() || !text?.trim()) {
+    res.status(400).json({ message: "number e text são obrigatórios." });
+    return;
+  }
+
+  const clean = number.replace(/\D/g, "");
+  if (clean.length < 8) {
+    res.status(400).json({ message: "Número de telefone inválido." });
+    return;
+  }
+
+  const { ok, status, data } = await evoFetch(
+    `${cfg.url}/message/sendText/${cfg.instanceName}`,
+    cfg.apiKey,
+    "POST",
+    { number: clean, text: text.trim() },
+  );
+
+  if (ok) {
+    res.json(data);
+  } else {
+    res.status(502).json({ message: extractEvoError(data, status) });
+  }
+});
+
 // ── Send media message ────────────────────────────────────
 router.post("/messages/send-media", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
