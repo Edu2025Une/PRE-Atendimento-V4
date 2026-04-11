@@ -18,6 +18,26 @@ async function getUserCfg(userId: string, res: { status: (c: number) => { json: 
   return cfg;
 }
 
+function extractEvoMessage(data: unknown, httpStatus: number): string {
+  if (typeof data === "string" && data.trim()) return data.trim().slice(0, 300);
+  if (typeof data === "object" && data !== null) {
+    const d = data as Record<string, unknown>;
+    const msg =
+      (d.message as string) ??
+      (d.error as string) ??
+      (d.msg as string) ??
+      ((d.response as Record<string, unknown>)?.message as string) ??
+      ((d.response as Record<string, unknown>)?.error as string) ??
+      null;
+    if (msg) return String(msg).slice(0, 300);
+  }
+  if (httpStatus === 401) return "API Key inválida ou sem permissão. Verifique a chave configurada.";
+  if (httpStatus === 403) return "Acesso negado pela Evolution API. Verifique a API Key.";
+  if (httpStatus === 404) return "Instância não encontrada na Evolution API. Crie a instância primeiro.";
+  if (httpStatus === 409) return "Já existe um recurso com este nome na Evolution API.";
+  return `Erro ${httpStatus} na Evolution API.`;
+}
+
 async function evoProxy(
   url: string,
   apiKey: string,
@@ -44,8 +64,6 @@ async function evoProxy(
 }
 
 // ── Get user's own instance ───────────────────────────────────
-// Returns ONLY the user's bound instance (never the global list).
-// instanceName is always resolved from DB via user_id.
 router.get("/instances", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
@@ -74,8 +92,6 @@ router.get("/instances", async (req, res) => {
 });
 
 // ── Create user's instance ────────────────────────────────────
-// instanceName is ALWAYS taken from DB (user's saved config).
-// Any instanceName sent in the request body is ignored.
 router.post("/instances", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
@@ -84,23 +100,32 @@ router.post("/instances", async (req, res) => {
   const integration = (req.body as { integration?: string }).integration ?? "WHATSAPP-BAILEYS";
 
   try {
-    const { ok, data } = await evoProxy(
+    const { ok, status, data } = await evoProxy(
       `${cfg.url}/instance/create`,
       cfg.apiKey,
       "POST",
       { instanceName, integration },
       15000,
     );
-    res.status(ok ? 201 : 502).json(data);
-  } catch (err) {
+    if (!ok) {
+      const message = extractEvoMessage(data, status);
+      res.status(502).json({ message, evoStatus: status, evoData: data });
+      return;
+    }
+    res.status(201).json(data);
+  } catch (err: unknown) {
     req.log.error({ err }, "Erro ao criar instância");
-    res.status(502).json({ message: "Não foi possível criar a instância." });
+    const msg = err instanceof Error ? err.message : "Erro desconhecido";
+    const isTimeout = msg.includes("timeout") || msg.includes("Timeout");
+    res.status(502).json({
+      message: isTimeout
+        ? "Tempo esgotado ao tentar criar a instância. Verifique se a URL da Evolution API está correta e acessível."
+        : `Não foi possível criar a instância: ${msg}`,
+    });
   }
 });
 
 // ── Get instance connection status ────────────────────────────
-// URL param is present only for routing compatibility.
-// instanceName is ALWAYS resolved from DB via user_id.
 router.get("/instances/:any/status", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
@@ -114,16 +139,25 @@ router.get("/instances/:any/status", async (req, res) => {
       undefined,
       8000,
     );
-    if (!ok) { res.status(502).json(typeof data === "object" ? data : { message: `Erro ${status}.` }); return; }
+    if (!ok) {
+      const message = extractEvoMessage(data, status);
+      res.status(502).json({ message, evoStatus: status });
+      return;
+    }
     res.json(data);
-  } catch (err) {
+  } catch (err: unknown) {
     req.log.error({ err }, "Erro ao obter status da instância");
-    res.status(502).json({ message: "Falha ao obter status da instância." });
+    const msg = err instanceof Error ? err.message : "Erro desconhecido";
+    const isTimeout = msg.includes("timeout") || msg.includes("Timeout");
+    res.status(502).json({
+      message: isTimeout
+        ? "Tempo esgotado. Verifique se a URL da Evolution API está correta e acessível."
+        : `Falha ao obter status da instância: ${msg}`,
+    });
   }
 });
 
 // ── Get QR Code (connect) ─────────────────────────────────────
-// instanceName is ALWAYS resolved from DB via user_id.
 router.get("/instances/:any/qrcode", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
@@ -137,7 +171,11 @@ router.get("/instances/:any/qrcode", async (req, res) => {
       undefined,
       30000,
     );
-    if (!ok) { res.status(502).json(typeof data === "object" ? data : { message: `Erro ${status}.` }); return; }
+    if (!ok) {
+      const message = extractEvoMessage(data, status);
+      res.status(502).json({ message, evoStatus: status, evoData: data });
+      return;
+    }
 
     const d = data as Record<string, unknown>;
     if (!d.base64 && d.count !== undefined) {
@@ -148,16 +186,30 @@ router.get("/instances/:any/qrcode", async (req, res) => {
       return;
     }
 
+    if (!d.base64) {
+      const inst = d.instance as Record<string, unknown> | undefined;
+      if (!inst?.base64) {
+        res.status(502).json({
+          message: "QR Code não retornado pela Evolution API. A instância pode já estar conectada ou foi criada há pouco.",
+        });
+        return;
+      }
+    }
+
     res.json(data);
-  } catch (err) {
+  } catch (err: unknown) {
     req.log.error({ err }, "Erro ao obter QR Code");
-    res.status(502).json({ message: "Falha ao gerar QR Code. Verifique se a instância existe e foi criada." });
+    const msg = err instanceof Error ? err.message : "Erro desconhecido";
+    const isTimeout = msg.includes("timeout") || msg.includes("Timeout");
+    res.status(502).json({
+      message: isTimeout
+        ? "Tempo esgotado ao gerar QR Code. Verifique se a URL da Evolution API está acessível."
+        : `Falha ao gerar QR Code: ${msg}`,
+    });
   }
 });
 
 // ── Logout / disconnect instance ──────────────────────────────
-// Must be declared BEFORE the bare delete route to take precedence.
-// instanceName is ALWAYS resolved from DB via user_id.
 router.delete("/instances/:any/logout", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
@@ -171,16 +223,20 @@ router.delete("/instances/:any/logout", async (req, res) => {
       undefined,
       15000,
     );
-    if (!ok) { res.status(502).json(typeof data === "object" ? data : { message: `Erro ${status}.` }); return; }
+    if (!ok) {
+      const message = extractEvoMessage(data, status);
+      res.status(502).json({ message, evoStatus: status });
+      return;
+    }
     res.json({ ok: true, message: "WhatsApp desconectado com sucesso." });
-  } catch (err) {
+  } catch (err: unknown) {
     req.log.error({ err }, "Erro ao desconectar instância");
-    res.status(502).json({ message: "Falha ao desconectar a instância." });
+    const msg = err instanceof Error ? err.message : "Erro desconhecido";
+    res.status(502).json({ message: `Falha ao desconectar a instância: ${msg}` });
   }
 });
 
 // ── Restart instance ──────────────────────────────────────────
-// instanceName is ALWAYS resolved from DB via user_id.
 router.put("/instances/:any/restart", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
@@ -194,16 +250,20 @@ router.put("/instances/:any/restart", async (req, res) => {
       {},
       15000,
     );
-    if (!ok) { res.status(502).json(typeof data === "object" ? data : { message: `Erro ${status}.` }); return; }
+    if (!ok) {
+      const message = extractEvoMessage(data, status);
+      res.status(502).json({ message, evoStatus: status });
+      return;
+    }
     res.json({ ok: true, message: "Instância reiniciada.", data });
-  } catch (err) {
+  } catch (err: unknown) {
     req.log.error({ err }, "Erro ao reiniciar instância");
-    res.status(502).json({ message: "Falha ao reiniciar a instância." });
+    const msg = err instanceof Error ? err.message : "Erro desconhecido";
+    res.status(502).json({ message: `Falha ao reiniciar a instância: ${msg}` });
   }
 });
 
 // ── Delete instance completely ────────────────────────────────
-// instanceName is ALWAYS resolved from DB via user_id.
 router.delete("/instances/:any", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
@@ -217,11 +277,16 @@ router.delete("/instances/:any", async (req, res) => {
       undefined,
       15000,
     );
-    if (!ok) { res.status(502).json(typeof data === "object" ? data : { message: `Erro ${status}.` }); return; }
+    if (!ok) {
+      const message = extractEvoMessage(data, status);
+      res.status(502).json({ message, evoStatus: status });
+      return;
+    }
     res.json({ ok: true, message: "Instância apagada com sucesso." });
-  } catch (err) {
+  } catch (err: unknown) {
     req.log.error({ err }, "Erro ao apagar instância");
-    res.status(502).json({ message: "Falha ao apagar a instância." });
+    const msg = err instanceof Error ? err.message : "Erro desconhecido";
+    res.status(502).json({ message: `Falha ao apagar a instância: ${msg}` });
   }
 });
 

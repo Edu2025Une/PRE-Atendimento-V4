@@ -78,6 +78,10 @@ export default function MinhaEvolution() {
   const [creatingInstance, setCreatingInstance] = useState(false);
   const [createMsg, setCreateMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // ── Test connection ───────────────────────────────────────
+  const [testingConn, setTestingConn] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   // ── Auth + config load ────────────────────────────────────
   useEffect(() => {
     const session = getSession();
@@ -176,7 +180,14 @@ export default function MinhaEvolution() {
         setPhase("loading");
         setTimeout(() => fetchStatus(token, instName), 800);
       } else {
-        setActionMsg({ ok: false, text: err.message ?? "Falha ao obter QR Code." });
+        const msg = err.message ?? "Falha ao obter QR Code.";
+        const notFound = msg.toLowerCase().includes("não encontrada") || msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("404");
+        setActionMsg({
+          ok: false,
+          text: notFound
+            ? "Instância não encontrada. Vá até 'Instância na Evolution API' abaixo e clique em Criar instância primeiro."
+            : msg,
+        });
         setPhase("disconnected");
       }
     }
@@ -227,19 +238,18 @@ export default function MinhaEvolution() {
   }
 
   // ── Create instance ───────────────────────────────────────
-  // Uses the instanceName from the user's saved config (resolved on backend).
-  // No name input required — the backend always uses the bound instance.
   async function handleCreateInstance() {
     if (!token || !savedConfig) return;
     setCreateMsg(null);
     setCreatingInstance(true);
     try {
       await createInstance(token, { instanceName: savedConfig.instanceName });
-      setCreateMsg({ ok: true, text: `Instância "${savedConfig.instanceName}" criada com sucesso! Agora obtenha o QR Code para conectar.` });
-      setTimeout(() => fetchStatus(token, savedConfig.instanceName), 1000);
+      setCreateMsg({ ok: true, text: `Instância "${savedConfig.instanceName}" criada com sucesso! Agora clique em "Obter QR Code" para conectar.` });
+      setTimeout(() => fetchStatus(token, savedConfig.instanceName), 1200);
     } catch (e: unknown) {
       const err = e as { message?: string };
-      setCreateMsg({ ok: false, text: err.message ?? "Erro ao criar instância." });
+      const msg = err.message ?? "Erro ao criar instância.";
+      setCreateMsg({ ok: false, text: msg });
     } finally {
       setCreatingInstance(false);
     }
@@ -274,6 +284,22 @@ export default function MinhaEvolution() {
       setSaveMsg({ ok: false, text: err.message ?? "Erro ao salvar." });
     } finally {
       setSaving(false);
+    }
+  }
+
+  // ── Test connection ───────────────────────────────────────
+  async function handleTestConn() {
+    if (!token) return;
+    setTestMsg(null);
+    setTestingConn(true);
+    try {
+      const result = await testEvolutionConfig(token);
+      setTestMsg({ ok: result.ok, text: result.message });
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setTestMsg({ ok: false, text: err.message ?? "Falha ao testar conexão." });
+    } finally {
+      setTestingConn(false);
     }
   }
 
@@ -505,10 +531,28 @@ export default function MinhaEvolution() {
               </div>
             )}
 
-            <div className="form-actions">
+            {testMsg && (
+              <div className={testMsg.ok ? "success-message" : "error-message"} role="alert" style={{ marginTop: "0.75rem" }}>
+                {testMsg.text}
+              </div>
+            )}
+
+            <div className="form-actions" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
               <button type="submit" className="btn-primary sm" disabled={saving}>
                 {saving ? <span className="btn-loading"><span className="spinner" />Salvando…</span> : "Salvar configuração"}
               </button>
+              {savedConfig?.hasApiKey && (
+                <button
+                  type="button"
+                  className="btn-secondary sm"
+                  onClick={handleTestConn}
+                  disabled={testingConn || saving}
+                >
+                  {testingConn
+                    ? <span className="btn-loading"><span className="spinner dark" />Testando…</span>
+                    : "🔌 Testar conexão"}
+                </button>
+              )}
             </div>
           </form>
         )}
