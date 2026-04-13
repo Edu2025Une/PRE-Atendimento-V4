@@ -303,6 +303,12 @@ router.delete("/instances/:any", async (req, res) => {
       );
     }
 
+    // 404 means it doesn't exist on the Evolution API — treat as already deleted
+    if (!result.ok && result.status === 404) {
+      res.json({ ok: true, message: "Instância removida (não existia na Evolution API)." });
+      return;
+    }
+
     if (!result.ok) {
       const message = extractEvoMessage(result.data, result.status);
       res.status(502).json({ message, evoStatus: result.status });
