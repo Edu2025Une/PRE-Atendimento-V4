@@ -13,12 +13,12 @@ router.get("/evolution-config", async (req, res) => {
 
 router.post("/evolution-config", async (req, res) => {
   const userId = req.jwtUser!.id;
-  const { url, apiKey, instanceName } = req.body as {
-    url?: string; apiKey?: string; instanceName?: string;
+  const { url, apiKey } = req.body as {
+    url?: string; apiKey?: string;
   };
 
-  if (!url?.trim() || !instanceName?.trim()) {
-    res.status(400).json({ message: "URL e nome da instância são obrigatórios." }); return;
+  if (!url?.trim()) {
+    res.status(400).json({ message: "A URL da Evolution API é obrigatória." }); return;
   }
 
   const existing = await getConfig(userId);
@@ -30,7 +30,10 @@ router.post("/evolution-config", async (req, res) => {
     res.status(400).json({ message: "URL inválida. Inclua o protocolo (https://)." }); return;
   }
 
-  const saved = await saveConfig(userId, url.trim(), apiKey?.trim() ?? "", instanceName.trim());
+  // Keep existing instance name or auto-generate from userId
+  const instanceName = existing?.instanceName || `inst-${userId.replace(/-/g, "").slice(0, 12)}`;
+
+  const saved = await saveConfig(userId, url.trim(), apiKey?.trim() ?? "", instanceName);
   res.json({ config: saved });
 });
 

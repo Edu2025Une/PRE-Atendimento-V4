@@ -71,7 +71,6 @@ export default function MinhaEvolution() {
   // ── Config form ───────────────────────────────────────────
   const [url, setUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [instanceName, setInstanceName] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
@@ -106,7 +105,6 @@ export default function MinhaEvolution() {
       if (config) {
         setSavedConfig(config);
         setUrl(config.url);
-        setInstanceName(config.instanceName);
         if (config.hasApiKey) {
           fetchStatus(tk, config.instanceName);
         } else {
@@ -264,8 +262,8 @@ export default function MinhaEvolution() {
   async function handleSave(e: FormEvent) {
     e.preventDefault();
     setSaveMsg(null);
-    if (!url.trim() || !instanceName.trim()) {
-      setSaveMsg({ ok: false, text: "URL e nome da instância são obrigatórios." });
+    if (!url.trim()) {
+      setSaveMsg({ ok: false, text: "A URL da Evolution API é obrigatória." });
       return;
     }
     if (!apiKey.trim() && !savedConfig?.hasApiKey) {
@@ -275,7 +273,7 @@ export default function MinhaEvolution() {
     setSaving(true);
     try {
       const { config } = await saveEvolutionConfig(token, {
-        url: url.trim(), apiKey: apiKey.trim(), instanceName: instanceName.trim(),
+        url: url.trim(), apiKey: apiKey.trim(),
       });
       setSavedConfig(config);
       setApiKey("");
@@ -531,20 +529,12 @@ export default function MinhaEvolution() {
               </div>
             )}
             <div className="config-grid">
-              <div className="field-group">
+              <div className="field-group full-width">
                 <label htmlFor="evo-url">URL da Evolution API</label>
                 <input
                   id="evo-url" type="url"
                   placeholder="https://sua-evolution-api.com"
                   value={url} onChange={e => setUrl(e.target.value)} disabled={saving}
-                />
-              </div>
-              <div className="field-group">
-                <label htmlFor="evo-instance">Nome da instância</label>
-                <input
-                  id="evo-instance" type="text"
-                  placeholder="minha-instancia"
-                  value={instanceName} onChange={e => setInstanceName(e.target.value)} disabled={saving}
                 />
               </div>
               <div className="field-group full-width">

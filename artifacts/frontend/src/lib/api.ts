@@ -134,7 +134,7 @@ export async function getEvolutionConfig(token: string) {
 
 export async function saveEvolutionConfig(
   token: string,
-  p: { url: string; apiKey: string; instanceName: string },
+  p: { url: string; apiKey: string },
 ) {
   return request<{ config: EvolutionConfigPublic }>("/evolution-config", {
     method: "POST",
