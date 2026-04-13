@@ -85,7 +85,18 @@ export default function MinhaEvolution() {
 
   // ── Delete instance ───────────────────────────────────────
   const [deletingInstance, setDeletingInstance] = useState(false);
-  const [instanceDeleted, setInstanceDeleted] = useState(false);
+  const [instanceDeleted, setInstanceDeleted] = useState(
+    () => sessionStorage.getItem("evo_instance_deleted") === "1"
+  );
+
+  function markDeleted() {
+    sessionStorage.setItem("evo_instance_deleted", "1");
+    setInstanceDeleted(true);
+  }
+  function clearDeleted() {
+    sessionStorage.removeItem("evo_instance_deleted");
+    setInstanceDeleted(false);
+  }
 
   // ── Auth + config load ────────────────────────────────────
   useEffect(() => {
@@ -101,7 +112,6 @@ export default function MinhaEvolution() {
 
   async function loadConfig(tk: string) {
     setLoadingConfig(true);
-    setInstanceDeleted(false);
     try {
       const { config } = await getEvolutionConfig(tk);
       if (config) {
