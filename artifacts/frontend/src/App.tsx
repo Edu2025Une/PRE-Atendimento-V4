@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import Dashboard from "@/pages/Dashboard";
@@ -10,6 +10,14 @@ import Usuarios from "@/pages/admin/Usuarios";
 import UsuarioEvolution from "@/pages/admin/UsuarioEvolution";
 import Auditoria from "@/pages/admin/Auditoria";
 import EvolutionConnections from "@/pages/admin/EvolutionConnections";
+
+function FallbackRedirect() {
+  const { pathname } = useLocation();
+  if (pathname.startsWith("/__replco") || pathname.startsWith("/@")) {
+    return <Login />;
+  }
+  return <Navigate to="/" replace />;
+}
 
 function App() {
   const base = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -27,7 +35,7 @@ function App() {
         <Route path="/admin/users/:id/evolution" element={<UsuarioEvolution />} />
         <Route path="/admin/audit" element={<Auditoria />} />
         <Route path="/admin/evolution-connections" element={<EvolutionConnections />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<FallbackRedirect />} />
       </Routes>
     </BrowserRouter>
   );
