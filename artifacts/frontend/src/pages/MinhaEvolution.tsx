@@ -5,11 +5,13 @@ import AppShell from "@/components/AppShell";
 import {
   getEvolutionConfig,
   saveEvolutionConfig,
+  testEvolutionConfig,
   getInstanceStatus,
   getInstanceQRCode,
   restartInstance,
   logoutInstance,
   createInstance,
+  deleteInstance,
   type EvolutionConfigPublic,
 } from "@/lib/api";
 
@@ -81,6 +83,9 @@ export default function MinhaEvolution() {
   // ── Test connection ───────────────────────────────────────
   const [testingConn, setTestingConn] = useState(false);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // ── Delete instance ───────────────────────────────────────
+  const [deletingInstance, setDeletingInstance] = useState(false);
 
   // ── Auth + config load ────────────────────────────────────
   useEffect(() => {
@@ -303,9 +308,30 @@ export default function MinhaEvolution() {
     }
   }
 
+  // ── Delete instance ───────────────────────────────────────
+  async function handleDeleteInstance() {
+    if (!savedConfig || !token) return;
+    const name = savedConfig.instanceName;
+    if (!confirm(`Apagar permanentemente a instância "${name}" da Evolution API?\n\nEsta ação não pode ser desfeita.`)) return;
+    setActionMsg(null);
+    stopPolling();
+    setQrData(null);
+    setDeletingInstance(true);
+    try {
+      const result = await deleteInstance(token, name);
+      setActionMsg({ ok: true, text: result.message });
+      setPhase("disconnected");
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setActionMsg({ ok: false, text: err.message ?? "Falha ao apagar a instância." });
+    } finally {
+      setDeletingInstance(false);
+    }
+  }
+
   // ── Derived helpers ───────────────────────────────────────
   const canAct = !!savedConfig?.hasApiKey;
-  const isWorking = phase === "qr-loading" || phase === "restarting" || phase === "logging-out" || phase === "loading";
+  const isWorking = phase === "qr-loading" || phase === "restarting" || phase === "logging-out" || phase === "loading" || deletingInstance;
   const activeInstance = savedConfig?.instanceName ?? "";
 
   // ── Render ────────────────────────────────────────────────
@@ -462,6 +488,18 @@ export default function MinhaEvolution() {
                     : "✕ Desconectar WhatsApp"}
                 </button>
               )}
+
+              <button
+                type="button"
+                className="btn-secondary sm btn-danger-outline"
+                onClick={handleDeleteInstance}
+                disabled={isWorking}
+                title="Apaga permanentemente a instância da Evolution API"
+              >
+                {deletingInstance
+                  ? <span className="btn-loading"><span className="spinner dark" />Apagando…</span>
+                  : "🗑 Apagar instância"}
+              </button>
             </div>
           </div>
         )}
