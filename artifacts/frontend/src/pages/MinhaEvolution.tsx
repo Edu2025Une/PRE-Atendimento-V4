@@ -85,6 +85,7 @@ export default function MinhaEvolution() {
 
   // ── Delete instance ───────────────────────────────────────
   const [deletingInstance, setDeletingInstance] = useState(false);
+  const [instanceDeleted, setInstanceDeleted] = useState(false);
 
   // ── Auth + config load ────────────────────────────────────
   useEffect(() => {
@@ -100,6 +101,7 @@ export default function MinhaEvolution() {
 
   async function loadConfig(tk: string) {
     setLoadingConfig(true);
+    setInstanceDeleted(false);
     try {
       const { config } = await getEvolutionConfig(tk);
       if (config) {
@@ -244,6 +246,7 @@ export default function MinhaEvolution() {
   async function handleCreateInstance() {
     if (!token || !savedConfig) return;
     setCreateMsg(null);
+    setInstanceDeleted(false);
     setCreatingInstance(true);
     try {
       await createInstance(token, { instanceName: savedConfig.instanceName });
@@ -316,8 +319,8 @@ export default function MinhaEvolution() {
     setQrData(null);
     setDeletingInstance(true);
     try {
-      const result = await deleteInstance(token, name);
-      setActionMsg({ ok: true, text: result.message });
+      await deleteInstance(token, name);
+      setInstanceDeleted(true);
       setPhase("disconnected");
     } catch (e: unknown) {
       const err = e as { message?: string };
@@ -367,6 +370,14 @@ export default function MinhaEvolution() {
             <div className="whatsapp-empty-icon">🔑</div>
             <p>API Key não configurada. Complete a configuração para continuar.</p>
             <button className="btn-primary sm" onClick={() => setConfigOpen(true)}>Completar configuração</button>
+          </div>
+        ) : instanceDeleted ? (
+          <div className="whatsapp-empty">
+            <div className="whatsapp-empty-icon">🗑️</div>
+            <p style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Instância apagada da Evolution API.</p>
+            <p style={{ fontSize: "0.875rem", color: "var(--text-muted)", marginBottom: "1rem" }}>
+              Para voltar a usar o WhatsApp, crie a instância novamente na seção abaixo.
+            </p>
           </div>
         ) : (
           <div className="whatsapp-body">
