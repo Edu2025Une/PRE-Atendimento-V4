@@ -18,24 +18,37 @@ async function getUserCfg(userId: string, res: { status: (c: number) => { json: 
   return cfg;
 }
 
+const GENERIC_HTTP_STRINGS = new Set([
+  "not found", "notfound", "unauthorized", "forbidden",
+  "bad request", "internal server error", "bad gateway",
+  "service unavailable", "gateway timeout",
+]);
+
 function extractEvoMessage(data: unknown, httpStatus: number): string {
-  if (typeof data === "string" && data.trim()) return data.trim().slice(0, 300);
+  if (typeof data === "string") {
+    const trimmed = data.trim();
+    if (trimmed && !GENERIC_HTTP_STRINGS.has(trimmed.toLowerCase())) {
+      return trimmed.slice(0, 300);
+    }
+  }
   if (typeof data === "object" && data !== null) {
     const d = data as Record<string, unknown>;
-    const msg =
+    const raw =
       (d.message as string) ??
       (d.error as string) ??
       (d.msg as string) ??
       ((d.response as Record<string, unknown>)?.message as string) ??
       ((d.response as Record<string, unknown>)?.error as string) ??
       null;
-    if (msg) return String(msg).slice(0, 300);
+    if (raw && !GENERIC_HTTP_STRINGS.has(String(raw).toLowerCase())) {
+      return String(raw).slice(0, 300);
+    }
   }
   if (httpStatus === 401) return "API Key inválida ou sem permissão. Verifique a chave configurada.";
   if (httpStatus === 403) return "Acesso negado pela Evolution API. Verifique a API Key.";
-  if (httpStatus === 404) return "Instância não encontrada na Evolution API. Crie a instância primeiro.";
+  if (httpStatus === 404) return "Instância não encontrada na Evolution API. Ela pode não existir ou já ter sido apagada.";
   if (httpStatus === 409) return "Já existe um recurso com este nome na Evolution API.";
-  return `Erro ${httpStatus} na Evolution API.`;
+  return `Erro ${httpStatus} retornado pela Evolution API.`;
 }
 
 async function evoProxy(
@@ -264,29 +277,47 @@ router.put("/instances/:any/restart", async (req, res) => {
 });
 
 // ── Delete instance completely ────────────────────────────────
+// Tries /instance/delete/{name} first; if 404, falls back to /instance/{name}
 router.delete("/instances/:any", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
   const instanceName = cfg.instanceName;
   try {
-    const { ok, status, data } = await evoProxy(
+    let result = await evoProxy(
       `${cfg.url}/instance/delete/${instanceName}`,
       cfg.apiKey,
       "DELETE",
       undefined,
       15000,
     );
-    if (!ok) {
-      const message = extractEvoMessage(data, status);
-      res.status(502).json({ message, evoStatus: status });
+
+    // Some Evolution API versions use DELETE /instance/{name} directly
+    if (!result.ok && result.status === 404) {
+      result = await evoProxy(
+        `${cfg.url}/instance/${instanceName}`,
+        cfg.apiKey,
+        "DELETE",
+        undefined,
+        15000,
+      );
+    }
+
+    if (!result.ok) {
+      const message = extractEvoMessage(result.data, result.status);
+      res.status(502).json({ message, evoStatus: result.status });
       return;
     }
     res.json({ ok: true, message: "Instância apagada com sucesso." });
   } catch (err: unknown) {
     req.log.error({ err }, "Erro ao apagar instância");
     const msg = err instanceof Error ? err.message : "Erro desconhecido";
-    res.status(502).json({ message: `Falha ao apagar a instância: ${msg}` });
+    const isTimeout = msg.includes("timeout") || msg.includes("Timeout");
+    res.status(502).json({
+      message: isTimeout
+        ? "Tempo esgotado ao tentar apagar a instância. Verifique se a URL da Evolution API está acessível."
+        : `Falha ao apagar a instância: ${msg}`,
+    });
   }
 });
 
