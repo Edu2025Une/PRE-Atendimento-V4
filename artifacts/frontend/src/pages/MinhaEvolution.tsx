@@ -6,99 +6,321 @@ import {
   getEvolutionConfig,
   saveEvolutionConfig,
   testEvolutionConfig,
+  listInstances,
+  createInstance,
   getInstanceStatus,
   getInstanceQRCode,
   restartInstance,
   logoutInstance,
-  createInstance,
   deleteInstance,
   type EvolutionConfigPublic,
+  type WhatsAppInstance,
 } from "@/lib/api";
 
-type ConnPhase =
-  | "idle"
-  | "loading"
-  | "connected"
-  | "disconnected"
-  | "connecting"
-  | "qr-loading"
-  | "qr-ready"
-  | "restarting"
-  | "logging-out";
+// ── Helpers ───────────────────────────────────────────────────
 
-interface QRData {
-  base64: string;
-  code?: string;
+function extractName(inst: WhatsAppInstance): string {
+  return (
+    (inst.instance?.instanceName as string) ??
+    (inst.instance?.name as string) ??
+    (inst.instanceName as string) ??
+    (inst.name as string) ??
+    "—"
+  );
 }
 
-function extractConnState(data: Record<string, unknown>): string {
-  const inst = data.instance as Record<string, unknown> | undefined;
+function extractState(inst: WhatsAppInstance): string {
   return (
-    (inst?.state as string) ??
-    (inst?.status as string) ??
-    (data.state as string) ??
+    (inst.instance?.state as string) ??
+    (inst.instance?.connectionStatus as string) ??
+    (inst.instance?.status as string) ??
+    (inst.connectionStatus as string) ??
+    (inst.status as string) ??
     "unknown"
   );
 }
 
-function extractQR(data: Record<string, unknown>): QRData | null {
-  const inst = data.instance as Record<string, unknown> | undefined;
-  const b64 = (inst?.base64 ?? data.base64) as string | undefined;
-  const code = (inst?.code ?? data.code) as string | undefined;
-  if (!b64) return null;
-  return { base64: b64, code };
+function normalizeState(s: string): "connected" | "disconnected" | "connecting" | "unknown" {
+  const lower = s.toLowerCase();
+  if (lower === "open" || lower === "connected") return "connected";
+  if (lower === "connecting") return "connecting";
+  if (lower === "close" || lower === "closed" || lower === "close_wait" || lower === "disconnected") return "disconnected";
+  return "unknown";
 }
 
-function phaseFromStatus(s: string): ConnPhase {
-  if (s === "open" || s === "connected") return "connected";
-  if (s === "connecting") return "connecting";
-  if (s === "close" || s === "closed" || s === "close_wait") return "disconnected";
-  return "disconnected";
+function StateChip({ state }: { state: string }) {
+  const norm = normalizeState(state);
+  const map = {
+    connected: { label: "Conectado", cls: "conn-badge connected" },
+    connecting: { label: "Conectando", cls: "conn-badge connecting" },
+    disconnected: { label: "Desconectado", cls: "conn-badge disconnected" },
+    unknown: { label: "Desconhecido", cls: "conn-badge loading" },
+  };
+  const { label, cls } = map[norm];
+  return <span className={cls}>{norm === "connected" ? "●" : norm === "connecting" ? "◌" : "○"} {label}</span>;
 }
+
+// ── QR Code modal ─────────────────────────────────────────────
+
+interface QRModalProps {
+  instanceName: string;
+  token: string;
+  onClose: () => void;
+  onConnected: () => void;
+}
+
+function QRModal({ instanceName, token, onClose, onConnected }: QRModalProps) {
+  const [phase, setPhase] = useState<"loading" | "ready" | "error" | "connected">("loading");
+  const [qrBase64, setQrBase64] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function stopPoll() {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }
+
+  async function loadQR() {
+    setPhase("loading");
+    setErrorMsg("");
+    try {
+      const data = await getInstanceQRCode(token, instanceName);
+      const b64 = (data.instance?.base64 ?? data.base64) as string | undefined;
+      if (b64) {
+        setQrBase64(b64);
+        setPhase("ready");
+        startPoll();
+      } else {
+        setErrorMsg("QR Code não retornado. A instância pode já estar conectada.");
+        setPhase("error");
+      }
+    } catch (e: unknown) {
+      const err = e as { message?: string; status?: number };
+      if (err.status === 409) {
+        setPhase("connected");
+        stopPoll();
+        setTimeout(onConnected, 1500);
+      } else {
+        setErrorMsg(err.message ?? "Falha ao gerar QR Code.");
+        setPhase("error");
+      }
+    }
+  }
+
+  function startPoll() {
+    stopPoll();
+    pollRef.current = setInterval(async () => {
+      try {
+        const data = await getInstanceStatus(token, instanceName);
+        const inst = data.instance as Record<string, unknown> | undefined;
+        const state = ((inst?.state ?? inst?.status ?? data.state) as string) ?? "unknown";
+        if (normalizeState(state) === "connected") {
+          stopPoll();
+          setPhase("connected");
+          setTimeout(onConnected, 1200);
+        }
+      } catch { /* keep polling */ }
+    }, 4000);
+  }
+
+  useEffect(() => { loadQR(); return stopPoll; }, []);
+
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) { stopPoll(); onClose(); } }}>
+      <div className="modal-box" style={{ maxWidth: 400 }}>
+        <div className="modal-header">
+          <h3>Conectar instância</h3>
+          <button className="modal-close" onClick={() => { stopPoll(); onClose(); }}>✕</button>
+        </div>
+
+        <div style={{ padding: "1.5rem", textAlign: "center" }}>
+          <p style={{ marginBottom: "0.5rem", fontWeight: 600 }}>{instanceName}</p>
+
+          {phase === "loading" && (
+            <div className="qr-placeholder">
+              <span className="spinner dark" />
+              <span>Gerando QR Code…</span>
+            </div>
+          )}
+
+          {phase === "ready" && qrBase64 && (
+            <div className="qr-code-area">
+              <img src={qrBase64} alt="QR Code WhatsApp" className="qr-code-img" style={{ margin: "0 auto" }} />
+              <p className="qr-hint">Abra o WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
+              <p className="qr-hint-sub">O QR Code expira em ~60 segundos</p>
+              <button type="button" className="btn-ghost sm" onClick={loadQR} style={{ marginTop: "0.5rem" }}>
+                ↺ Atualizar QR Code
+              </button>
+            </div>
+          )}
+
+          {phase === "error" && (
+            <div>
+              <div className="error-message" style={{ marginBottom: "1rem" }}>{errorMsg}</div>
+              <button type="button" className="btn-secondary sm" onClick={loadQR}>Tentar novamente</button>
+            </div>
+          )}
+
+          {phase === "connected" && (
+            <div className="whatsapp-connected-state">
+              <div className="whatsapp-check">✓</div>
+              <p className="whatsapp-connected-text">WhatsApp conectado!</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Create instance modal ─────────────────────────────────────
+
+interface CreateModalProps {
+  token: string;
+  onClose: () => void;
+  onCreated: (name: string) => void;
+}
+
+function CreateModal({ token, onClose, onCreated }: CreateModalProps) {
+  const [name, setName] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) { setError("Nome da instância é obrigatório."); return; }
+    if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      setError("Use apenas letras, números, hífen e underscore.");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      await createInstance(token, { instanceName: trimmed });
+      onCreated(trimmed);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setError(err.message ?? "Erro ao criar instância.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal-box" style={{ maxWidth: 420 }}>
+        <div className="modal-header">
+          <h3>Nova instância</h3>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <form onSubmit={handleSubmit} style={{ padding: "1.5rem" }}>
+          <div className="field-group" style={{ marginBottom: "1rem" }}>
+            <label htmlFor="inst-name">Nome da instância</label>
+            <input
+              id="inst-name"
+              type="text"
+              placeholder="ex: minha-instancia"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              disabled={loading}
+              autoFocus
+            />
+            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "block" }}>
+              Apenas letras, números, hífen e underscore.
+            </span>
+          </div>
+          {error && <div className="error-message" style={{ marginBottom: "1rem" }}>{error}</div>}
+          <div style={{ display: "flex", gap: "0.75rem", justifyContent: "flex-end" }}>
+            <button type="button" className="btn-secondary sm" onClick={onClose} disabled={loading}>Cancelar</button>
+            <button type="submit" className="btn-primary sm" disabled={loading}>
+              {loading ? <span className="btn-loading"><span className="spinner" />Criando…</span> : "Criar instância"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Confirm modal ─────────────────────────────────────────────
+
+interface ConfirmModalProps {
+  message: string;
+  confirmLabel: string;
+  danger?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function ConfirmModal({ message, confirmLabel, danger, onConfirm, onCancel }: ConfirmModalProps) {
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="modal-box" style={{ maxWidth: 380 }}>
+        <div className="modal-header">
+          <h3>Confirmar ação</h3>
+          <button className="modal-close" onClick={onCancel}>✕</button>
+        </div>
+        <div style={{ padding: "1.5rem" }}>
+          <p style={{ marginBottom: "1.5rem" }}>{message}</p>
+          <div style={{ display: "flex", gap: "0.75rem", justifyContent: "flex-end" }}>
+            <button type="button" className="btn-secondary sm" onClick={onCancel}>Cancelar</button>
+            <button
+              type="button"
+              className={danger ? "btn-danger sm" : "btn-primary sm"}
+              onClick={onConfirm}
+            >
+              {confirmLabel}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Row action state ──────────────────────────────────────────
+
+type RowAction = "qr" | "restart" | "logout" | "delete" | null;
+
+interface RowState {
+  action: RowAction;
+  msg: { ok: boolean; text: string } | null;
+}
+
+// ── Main page ─────────────────────────────────────────────────
 
 export default function MinhaEvolution() {
   const navigate = useNavigate();
   const [token, setToken] = useState("");
   const [savedConfig, setSavedConfig] = useState<EvolutionConfigPublic | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(true);
+  const [configOpen, setConfigOpen] = useState(false);
 
-  // ── Connection panel ──────────────────────────────────────
-  const [phase, setPhase] = useState<ConnPhase>("idle");
-  const [qrData, setQrData] = useState<QRData | null>(null);
-  const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ── Config form ───────────────────────────────────────────
+  // Config form
   const [url, setUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [configOpen, setConfigOpen] = useState(false);
 
-  // ── Create instance ───────────────────────────────────────
-  const [creatingInstance, setCreatingInstance] = useState(false);
-  const [createMsg, setCreateMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
-  // ── Test connection ───────────────────────────────────────
+  // Test connection
   const [testingConn, setTestingConn] = useState(false);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  // ── Delete instance ───────────────────────────────────────
-  const [deletingInstance, setDeletingInstance] = useState(false);
-  const [instanceDeleted, setInstanceDeleted] = useState(
-    () => sessionStorage.getItem("evo_instance_deleted") === "1"
-  );
+  // Instances list
+  const [instances, setInstances] = useState<WhatsAppInstance[]>([]);
+  const [loadingInst, setLoadingInst] = useState(false);
+  const [instError, setInstError] = useState("");
+  const [rowStates, setRowStates] = useState<Record<string, RowState>>({});
 
-  function markDeleted() {
-    sessionStorage.setItem("evo_instance_deleted", "1");
-    setInstanceDeleted(true);
-  }
-  function clearDeleted() {
-    sessionStorage.removeItem("evo_instance_deleted");
-    setInstanceDeleted(false);
-  }
+  // Modals
+  const [qrModal, setQrModal] = useState<string | null>(null);
+  const [createModal, setCreateModal] = useState(false);
+  const [confirmModal, setConfirmModal] = useState<{
+    instanceName: string;
+    action: "logout" | "delete";
+  } | null>(null);
 
-  // ── Auth + config load ────────────────────────────────────
+  // ── Auth + initial load ────────────────────────────────────
   useEffect(() => {
     const session = getSession();
     if (!session || Date.now() >= session.expiresAt) {
@@ -118,160 +340,38 @@ export default function MinhaEvolution() {
         setSavedConfig(config);
         setUrl(config.url);
         if (config.hasApiKey) {
-          fetchStatus(tk, config.instanceName);
+          await loadInstances(tk);
         } else {
-          setPhase("disconnected");
           setConfigOpen(true);
         }
       } else {
-        setPhase("idle");
         setConfigOpen(true);
       }
     } catch {
-      setPhase("idle");
+      setConfigOpen(true);
     } finally {
       setLoadingConfig(false);
     }
   }
 
-  // ── Status fetch ──────────────────────────────────────────
-  async function fetchStatus(tk: string, name: string) {
-    setPhase("loading");
+  // ── Load instances list ────────────────────────────────────
+  async function loadInstances(tk?: string) {
+    const t = tk ?? token;
+    if (!t) return;
+    setLoadingInst(true);
+    setInstError("");
     try {
-      const data = await getInstanceStatus(tk, name);
-      const state = extractConnState(data as Record<string, unknown>);
-      setPhase(phaseFromStatus(state));
-    } catch {
-      setPhase("disconnected");
-    }
-  }
-
-  // ── Polling ───────────────────────────────────────────────
-  function startPolling(tk: string, name: string) {
-    stopPolling();
-    pollRef.current = setInterval(async () => {
-      try {
-        const data = await getInstanceStatus(tk, name);
-        const state = extractConnState(data as Record<string, unknown>);
-        const newPhase = phaseFromStatus(state);
-        if (newPhase === "connected") {
-          stopPolling();
-          setQrData(null);
-          setPhase("connected");
-        } else if (newPhase !== "qr-ready") {
-          setPhase(p => p === "qr-ready" ? p : newPhase);
-        }
-      } catch { /* keep polling */ }
-    }, 4000);
-  }
-
-  function stopPolling() {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-  }
-
-  useEffect(() => () => stopPolling(), []);
-
-  // ── QR Code ───────────────────────────────────────────────
-  async function handleGetQR() {
-    const instName = savedConfig?.instanceName ?? "";
-    if (!instName || !token) return;
-    setActionMsg(null);
-    setPhase("qr-loading");
-    try {
-      const data = await getInstanceQRCode(token, instName);
-      const qr = extractQR(data as Record<string, unknown>);
-      if (qr) {
-        setQrData(qr);
-        setPhase("qr-ready");
-        startPolling(token, instName);
-      } else {
-        setActionMsg({ ok: false, text: "QR Code não retornado. Verifique se a instância foi criada." });
-        setPhase("disconnected");
-      }
-    } catch (e: unknown) {
-      const err = e as { message?: string; status?: number };
-      if (err.status === 409) {
-        setActionMsg({ ok: true, text: "A instância já está conectada. Atualizando status…" });
-        setPhase("loading");
-        setTimeout(() => fetchStatus(token, instName), 800);
-      } else {
-        const msg = err.message ?? "Falha ao obter QR Code.";
-        const notFound = msg.toLowerCase().includes("não encontrada") || msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("404");
-        setActionMsg({
-          ok: false,
-          text: notFound
-            ? "Instância não encontrada. Vá até 'Instância na Evolution API' abaixo e clique em Criar instância primeiro."
-            : msg,
-        });
-        setPhase("disconnected");
-      }
-    }
-  }
-
-  // ── Refresh status ────────────────────────────────────────
-  async function handleRefreshStatus() {
-    if (!savedConfig || !token) return;
-    setActionMsg(null);
-    await fetchStatus(token, savedConfig.instanceName);
-  }
-
-  // ── Restart ───────────────────────────────────────────────
-  async function handleRestart() {
-    if (!savedConfig || !token) return;
-    setActionMsg(null);
-    stopPolling();
-    setQrData(null);
-    setPhase("restarting");
-    try {
-      await restartInstance(token, savedConfig.instanceName);
-      setActionMsg({ ok: true, text: "Instância reiniciada. Aguardando reconexão…" });
-      setTimeout(() => fetchStatus(token, savedConfig.instanceName), 2500);
+      const { instances: list } = await listInstances(t);
+      setInstances(list);
     } catch (e: unknown) {
       const err = e as { message?: string };
-      setActionMsg({ ok: false, text: err.message ?? "Falha ao reiniciar." });
-      setPhase("disconnected");
-    }
-  }
-
-  // ── Logout ────────────────────────────────────────────────
-  async function handleLogout() {
-    if (!savedConfig || !token) return;
-    if (!confirm(`Desconectar o WhatsApp da instância "${savedConfig.instanceName}"?`)) return;
-    setActionMsg(null);
-    stopPolling();
-    setQrData(null);
-    setPhase("logging-out");
-    try {
-      const result = await logoutInstance(token, savedConfig.instanceName);
-      setActionMsg({ ok: true, text: result.message });
-      setPhase("disconnected");
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      setActionMsg({ ok: false, text: err.message ?? "Falha ao desconectar." });
-      setPhase("connected");
-    }
-  }
-
-  // ── Create instance ───────────────────────────────────────
-  async function handleCreateInstance() {
-    if (!token || !savedConfig) return;
-    setCreateMsg(null);
-    setInstanceDeleted(false);
-    setCreatingInstance(true);
-    try {
-      await createInstance(token, { instanceName: savedConfig.instanceName });
-      setCreateMsg({ ok: true, text: `Instância "${savedConfig.instanceName}" criada com sucesso! Agora clique em "Obter QR Code" para conectar.` });
-      setTimeout(() => fetchStatus(token, savedConfig.instanceName), 1200);
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      const msg = err.message ?? "Erro ao criar instância.";
-      setCreateMsg({ ok: false, text: msg });
+      setInstError(err.message ?? "Falha ao carregar instâncias.");
     } finally {
-      setCreatingInstance(false);
+      setLoadingInst(false);
     }
   }
 
-  // ── Save config ───────────────────────────────────────────
+  // ── Config save ────────────────────────────────────────────
   async function handleSave(e: FormEvent) {
     e.preventDefault();
     setSaveMsg(null);
@@ -285,16 +385,12 @@ export default function MinhaEvolution() {
     }
     setSaving(true);
     try {
-      const { config } = await saveEvolutionConfig(token, {
-        url: url.trim(), apiKey: apiKey.trim(),
-      });
+      const { config } = await saveEvolutionConfig(token, { url: url.trim(), apiKey: apiKey.trim() });
       setSavedConfig(config);
       setApiKey("");
-      setSaveMsg({ ok: true, text: "Configuração salva! Buscando status…" });
+      setSaveMsg({ ok: true, text: "Configuração salva com sucesso!" });
       setConfigOpen(false);
-      stopPolling();
-      setQrData(null);
-      fetchStatus(token, config.instanceName);
+      await loadInstances();
     } catch (e: unknown) {
       const err = e as { message?: string };
       setSaveMsg({ ok: false, text: err.message ?? "Erro ao salvar." });
@@ -303,9 +399,8 @@ export default function MinhaEvolution() {
     }
   }
 
-  // ── Test connection ───────────────────────────────────────
+  // ── Test connection ────────────────────────────────────────
   async function handleTestConn() {
-    if (!token) return;
     setTestMsg(null);
     setTestingConn(true);
     try {
@@ -319,224 +414,87 @@ export default function MinhaEvolution() {
     }
   }
 
-  // ── Delete instance ───────────────────────────────────────
-  async function handleDeleteInstance() {
-    if (!savedConfig || !token) return;
-    const name = savedConfig.instanceName;
-    if (!confirm(`Apagar permanentemente a instância "${name}" da Evolution API?\n\nEsta ação não pode ser desfeita.`)) return;
-    setActionMsg(null);
-    stopPolling();
-    setQrData(null);
-    setDeletingInstance(true);
+  // ── Row helpers ────────────────────────────────────────────
+  function setRow(name: string, patch: Partial<RowState>) {
+    setRowStates(prev => ({
+      ...prev,
+      [name]: { action: null, msg: null, ...prev[name], ...patch },
+    }));
+  }
+
+  function getRow(name: string): RowState {
+    return rowStates[name] ?? { action: null, msg: null };
+  }
+
+  // ── Restart ────────────────────────────────────────────────
+  async function handleRestart(name: string) {
+    setRow(name, { action: "restart", msg: null });
     try {
-      await deleteInstance(token, name);
-      setInstanceDeleted(true);
-      setPhase("disconnected");
+      await restartInstance(token, name);
+      setRow(name, { action: null, msg: { ok: true, text: "Instância reiniciada." } });
+      setTimeout(() => loadInstances(), 2000);
     } catch (e: unknown) {
       const err = e as { message?: string };
-      setActionMsg({ ok: false, text: err.message ?? "Falha ao apagar a instância." });
-    } finally {
-      setDeletingInstance(false);
+      setRow(name, { action: null, msg: { ok: false, text: err.message ?? "Falha ao reiniciar." } });
     }
   }
 
-  // ── Derived helpers ───────────────────────────────────────
-  const canAct = !!savedConfig?.hasApiKey;
-  const isWorking = phase === "qr-loading" || phase === "restarting" || phase === "logging-out" || phase === "loading" || deletingInstance;
-  const activeInstance = savedConfig?.instanceName ?? "";
+  // ── Logout confirm ─────────────────────────────────────────
+  async function confirmLogout(name: string) {
+    setConfirmModal(null);
+    setRow(name, { action: "logout", msg: null });
+    try {
+      const res = await logoutInstance(token, name);
+      setRow(name, { action: null, msg: { ok: true, text: res.message } });
+      setTimeout(() => loadInstances(), 1000);
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setRow(name, { action: null, msg: { ok: false, text: err.message ?? "Falha ao desconectar." } });
+    }
+  }
 
-  // ── Render ────────────────────────────────────────────────
+  // ── Delete confirm ─────────────────────────────────────────
+  async function confirmDelete(name: string) {
+    setConfirmModal(null);
+    setRow(name, { action: "delete", msg: null });
+    try {
+      const res = await deleteInstance(token, name);
+      setRow(name, { action: null, msg: { ok: true, text: res.message } });
+      setInstances(prev => prev.filter(i => extractName(i) !== name));
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      setRow(name, { action: null, msg: { ok: false, text: err.message ?? "Falha ao apagar." } });
+    }
+  }
+
+  // ── Instance created ───────────────────────────────────────
+  function handleCreated(name: string) {
+    setCreateModal(false);
+    loadInstances();
+    setQrModal(name);
+  }
+
   return (
     <AppShell>
       <div className="page-title-row">
         <div>
           <h1 className="page-title">Minha Evolution API</h1>
-          <p className="page-subtitle">Conecte seu WhatsApp via QR Code e gerencie sua instância.</p>
+          <p className="page-subtitle">Gerencie suas instâncias WhatsApp conectadas à Evolution API.</p>
         </div>
       </div>
 
-      {/* ═══════════════════════════════════════════════════ */}
-      {/* BLOCO 1 — Conexão WhatsApp (PRIORIDADE MÁXIMA)      */}
-      {/* ═══════════════════════════════════════════════════ */}
-      <section className="admin-section whatsapp-panel">
-        <div className="section-header">
-          <h3>Conexão WhatsApp</h3>
-          {phase === "connected" && <span className="conn-badge connected">● Conectado</span>}
-          {phase === "connecting" && <span className="conn-badge connecting">◌ Conectando</span>}
-          {(phase === "disconnected" || phase === "qr-ready") && <span className="conn-badge disconnected">○ Desconectado</span>}
-          {isWorking && <span className="conn-badge loading">⟳ Aguardando…</span>}
-        </div>
-
-        {loadingConfig ? (
-          <div className="users-loading"><span className="spinner dark" />Carregando configuração…</div>
-        ) : !savedConfig ? (
-          <div className="whatsapp-empty">
-            <div className="whatsapp-empty-icon">📱</div>
-            <p>Configure sua Evolution API abaixo para conectar o WhatsApp.</p>
-            <button className="btn-primary sm" onClick={() => setConfigOpen(true)}>Configurar agora</button>
-          </div>
-        ) : !savedConfig.hasApiKey ? (
-          <div className="whatsapp-empty">
-            <div className="whatsapp-empty-icon">🔑</div>
-            <p>API Key não configurada. Complete a configuração para continuar.</p>
-            <button className="btn-primary sm" onClick={() => setConfigOpen(true)}>Completar configuração</button>
-          </div>
-        ) : instanceDeleted ? (
-          <div className="whatsapp-empty">
-            <div className="whatsapp-empty-icon">🗑️</div>
-            <p style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Instância apagada da Evolution API.</p>
-            <p style={{ fontSize: "0.875rem", color: "var(--text-muted)", marginBottom: "1rem" }}>
-              Para voltar a usar o WhatsApp, crie a instância novamente na seção abaixo.
-            </p>
-          </div>
-        ) : (
-          <div className="whatsapp-body">
-            {/* Instance badge */}
-            <div className="whatsapp-instance-row">
-              <div className="instance-icon">W</div>
-              <span className="whatsapp-instance-name">{activeInstance}</span>
-            </div>
-
-            {/* QR Code or status area */}
-            <div className="whatsapp-center">
-              {phase === "connected" && (
-                <div className="whatsapp-connected-state">
-                  <div className="whatsapp-check">✓</div>
-                  <p className="whatsapp-connected-text">WhatsApp conectado com sucesso!</p>
-                  <p className="whatsapp-connected-sub">Sua instância <strong>{activeInstance}</strong> está online e pronta para uso.</p>
-                </div>
-              )}
-
-              {phase === "qr-loading" && (
-                <div className="qr-placeholder">
-                  <span className="spinner dark" />
-                  <span>Gerando QR Code…</span>
-                </div>
-              )}
-
-              {phase === "qr-ready" && qrData && (
-                <div className="qr-code-area">
-                  <img
-                    src={qrData.base64}
-                    alt="QR Code WhatsApp"
-                    className="qr-code-img"
-                  />
-                  <p className="qr-hint">Abra o WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
-                  <p className="qr-hint-sub">O QR Code expira em aproximadamente 60 segundos</p>
-                  <button
-                    type="button"
-                    className="btn-ghost sm"
-                    onClick={handleGetQR}
-                    disabled={isWorking}
-                  >
-                    ↺ Atualizar QR Code
-                  </button>
-                </div>
-              )}
-
-              {(phase === "disconnected" || phase === "connecting") && (
-                <div className="qr-placeholder idle">
-                  <div className="qr-placeholder-icon">📷</div>
-                  <p>{phase === "connecting" ? "Conectando ao WhatsApp…" : "Clique em \"Obter QR Code\" para conectar"}</p>
-                </div>
-              )}
-
-              {(phase === "restarting" || phase === "logging-out" || phase === "loading") && (
-                <div className="qr-placeholder">
-                  <span className="spinner dark" />
-                  <span>
-                    {phase === "restarting" ? "Reiniciando instância…"
-                      : phase === "logging-out" ? "Desconectando…"
-                      : "Verificando status…"}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Action message */}
-            {actionMsg && (
-              <div className={actionMsg.ok ? "success-message" : "error-message"} role="alert">
-                {actionMsg.text}
-              </div>
-            )}
-
-            {/* Action buttons */}
-            <div className="whatsapp-actions">
-              {phase !== "connected" && (
-                <button
-                  type="button"
-                  className="btn-primary sm whatsapp-qr-btn"
-                  onClick={handleGetQR}
-                  disabled={isWorking || phase === "qr-ready"}
-                >
-                  {phase === "qr-loading"
-                    ? <span className="btn-loading"><span className="spinner" />Gerando…</span>
-                    : phase === "qr-ready" ? "QR Code ativo" : "📱 Obter QR Code"}
-                </button>
-              )}
-
-              <button
-                type="button"
-                className="btn-secondary sm"
-                onClick={handleRefreshStatus}
-                disabled={isWorking}
-              >
-                ↺ Atualizar status
-              </button>
-
-              <button
-                type="button"
-                className="btn-secondary sm"
-                onClick={handleRestart}
-                disabled={isWorking}
-              >
-                {phase === "restarting"
-                  ? <span className="btn-loading"><span className="spinner dark" />Reiniciando…</span>
-                  : "⟳ Reiniciar instância"}
-              </button>
-
-              {phase === "connected" && (
-                <button
-                  type="button"
-                  className="btn-secondary sm btn-danger-outline"
-                  onClick={handleLogout}
-                  disabled={isWorking}
-                >
-                  {phase === "logging-out"
-                    ? <span className="btn-loading"><span className="spinner dark" />Desconectando…</span>
-                    : "✕ Desconectar WhatsApp"}
-                </button>
-              )}
-
-              <button
-                type="button"
-                className="btn-secondary sm btn-danger-outline"
-                onClick={handleDeleteInstance}
-                disabled={isWorking}
-                title="Apaga permanentemente a instância da Evolution API"
-              >
-                {deletingInstance
-                  ? <span className="btn-loading"><span className="spinner dark" />Apagando…</span>
-                  : "🗑 Apagar instância"}
-              </button>
-            </div>
-          </div>
-        )}
-      </section>
-
-      {/* ═══════════════════════════════════════════════════ */}
-      {/* BLOCO 2 — Configuração da conexão                   */}
-      {/* ═══════════════════════════════════════════════════ */}
-      <section className="admin-section">
+      {/* ═══ CONFIG SECTION ════════════════════════════════════ */}
+      <section className="admin-section" style={{ marginBottom: "1.5rem" }}>
         <button
           type="button"
           className="section-toggle-btn"
-          onClick={() => setConfigOpen(o => !o)}
+          onClick={() => { setConfigOpen(o => !o); setSaveMsg(null); setTestMsg(null); }}
         >
           <h3>Configuração da Evolution API</h3>
           <div className="section-toggle-right">
-            {savedConfig?.hasApiKey && <span className="config-badge">✓ Configurado</span>}
-            {!savedConfig?.hasApiKey && <span className="config-badge unconfigured">Pendente</span>}
+            {savedConfig?.hasApiKey
+              ? <span className="config-badge">✓ Configurado</span>
+              : <span className="config-badge unconfigured">Pendente</span>}
             <span className="section-toggle-arrow">{configOpen ? "▲" : "▼"}</span>
           </div>
         </button>
@@ -545,10 +503,10 @@ export default function MinhaEvolution() {
           <form onSubmit={handleSave} className="config-form">
             {savedConfig && (
               <div className="config-info-bar">
-                <span>Instância vinculada: <strong>{savedConfig.instanceName}</strong></span>
-                <span style={{ marginLeft: "1rem" }}>Última atualização: {new Date(savedConfig.updatedAt).toLocaleString("pt-BR")}</span>
+                <span>Última atualização: {new Date(savedConfig.updatedAt).toLocaleString("pt-BR")}</span>
               </div>
             )}
+
             <div className="config-grid">
               <div className="field-group full-width">
                 <label htmlFor="evo-url">URL da Evolution API</label>
@@ -560,16 +518,12 @@ export default function MinhaEvolution() {
               </div>
               <div className="field-group full-width">
                 <label htmlFor="evo-key">
-                  API Key
-                  {savedConfig?.hasApiKey && (
-                    <span className="field-hint"> (já configurada — deixe em branco para manter)</span>
-                  )}
+                  API Key {savedConfig?.hasApiKey && <span style={{ fontWeight: 400, color: "var(--text-muted)" }}>(deixe vazio para manter a atual)</span>}
                 </label>
                 <input
                   id="evo-key" type="password"
-                  placeholder={savedConfig?.hasApiKey ? "••••••••••••••••" : "Sua API Key"}
-                  value={apiKey} onChange={e => setApiKey(e.target.value)}
-                  disabled={saving} autoComplete="new-password"
+                  placeholder={savedConfig?.hasApiKey ? "••••••••••••••••" : "Cole sua API Key aqui"}
+                  value={apiKey} onChange={e => setApiKey(e.target.value)} disabled={saving}
                 />
               </div>
             </div>
@@ -579,64 +533,213 @@ export default function MinhaEvolution() {
                 {saveMsg.text}
               </div>
             )}
-
             {testMsg && (
-              <div className={testMsg.ok ? "success-message" : "error-message"} role="alert" style={{ marginTop: "0.75rem" }}>
+              <div className={testMsg.ok ? "success-message" : "error-message"} role="alert">
                 {testMsg.text}
               </div>
             )}
 
-            <div className="form-actions" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
-              <button type="submit" className="btn-primary sm" disabled={saving}>
-                {saving ? <span className="btn-loading"><span className="spinner" />Salvando…</span> : "Salvar configuração"}
+            <div className="config-actions">
+              <button
+                type="button"
+                className="btn-secondary sm"
+                onClick={handleTestConn}
+                disabled={saving || testingConn || !savedConfig?.hasApiKey}
+              >
+                {testingConn
+                  ? <span className="btn-loading"><span className="spinner dark" />Testando…</span>
+                  : "↗ Testar conexão"}
               </button>
-              {savedConfig?.hasApiKey && (
-                <button
-                  type="button"
-                  className="btn-secondary sm"
-                  onClick={handleTestConn}
-                  disabled={testingConn || saving}
-                >
-                  {testingConn
-                    ? <span className="btn-loading"><span className="spinner dark" />Testando…</span>
-                    : "🔌 Testar conexão"}
-                </button>
-              )}
+              <button type="submit" className="btn-primary sm" disabled={saving}>
+                {saving
+                  ? <span className="btn-loading"><span className="spinner" />Salvando…</span>
+                  : "Salvar configuração"}
+              </button>
             </div>
           </form>
         )}
       </section>
 
-      {/* ═══════════════════════════════════════════════════ */}
-      {/* BLOCO 3 — Criar instância na Evolution API          */}
-      {/* ═══════════════════════════════════════════════════ */}
-      {canAct && (
-        <section className="admin-section">
-          <div className="section-header">
-            <h3>Instância na Evolution API</h3>
-          </div>
-          <div style={{ padding: "0 1.25rem 1.25rem" }}>
-            <p style={{ marginBottom: "0.75rem", color: "var(--text-secondary)", fontSize: "0.875rem" }}>
-              Cria a instância <strong>{activeInstance}</strong> no servidor da Evolution API caso ela ainda não exista.
-              Se já existir, a criação será ignorada.
-            </p>
-            {createMsg && (
-              <div className={createMsg.ok ? "success-message" : "error-message"} role="alert" style={{ marginBottom: "0.75rem" }}>
-                {createMsg.text}
-              </div>
-            )}
+      {/* ═══ INSTANCES SECTION ════════════════════════════════ */}
+      <section className="admin-section">
+        <div className="section-header" style={{ marginBottom: "1rem" }}>
+          <h3>Instâncias</h3>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
             <button
               type="button"
               className="btn-secondary sm"
-              onClick={handleCreateInstance}
-              disabled={creatingInstance || isWorking}
+              onClick={() => loadInstances()}
+              disabled={loadingInst || !savedConfig?.hasApiKey}
             >
-              {creatingInstance
-                ? <span className="btn-loading"><span className="spinner dark" />Criando…</span>
-                : `Criar instância "${activeInstance}"`}
+              {loadingInst ? <span className="btn-loading"><span className="spinner dark" />Carregando…</span> : "↺ Atualizar"}
+            </button>
+            <button
+              type="button"
+              className="btn-primary sm"
+              onClick={() => setCreateModal(true)}
+              disabled={!savedConfig?.hasApiKey}
+            >
+              + Nova instância
             </button>
           </div>
-        </section>
+        </div>
+
+        {loadingConfig ? (
+          <div className="users-loading"><span className="spinner dark" />Carregando…</div>
+        ) : !savedConfig ? (
+          <div className="whatsapp-empty">
+            <div className="whatsapp-empty-icon">⚙️</div>
+            <p>Configure sua Evolution API acima para gerenciar instâncias.</p>
+            <button className="btn-primary sm" onClick={() => setConfigOpen(true)}>Configurar agora</button>
+          </div>
+        ) : !savedConfig.hasApiKey ? (
+          <div className="whatsapp-empty">
+            <div className="whatsapp-empty-icon">🔑</div>
+            <p>API Key não configurada. Complete a configuração para continuar.</p>
+            <button className="btn-primary sm" onClick={() => setConfigOpen(true)}>Completar configuração</button>
+          </div>
+        ) : loadingInst ? (
+          <div className="users-loading"><span className="spinner dark" />Buscando instâncias…</div>
+        ) : instError ? (
+          <div>
+            <div className="error-message" style={{ marginBottom: "1rem" }}>{instError}</div>
+            <button type="button" className="btn-secondary sm" onClick={() => loadInstances()}>Tentar novamente</button>
+          </div>
+        ) : instances.length === 0 ? (
+          <div className="whatsapp-empty">
+            <div className="whatsapp-empty-icon">📱</div>
+            <p>Nenhuma instância encontrada na sua Evolution API.</p>
+            <button className="btn-primary sm" onClick={() => setCreateModal(true)}>Criar primeira instância</button>
+          </div>
+        ) : (
+          <div className="table-wrapper">
+            <table className="users-table">
+              <thead>
+                <tr>
+                  <th>Nome</th>
+                  <th>Status</th>
+                  <th style={{ textAlign: "right" }}>Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {instances.map((inst) => {
+                  const name = extractName(inst);
+                  const state = extractState(inst);
+                  const row = getRow(name);
+                  const busy = row.action !== null;
+                  const isConnected = normalizeState(state) === "connected";
+
+                  return (
+                    <tr key={name}>
+                      <td>
+                        <span style={{ fontWeight: 600 }}>{name}</span>
+                        {row.msg && (
+                          <div
+                            style={{ fontSize: "0.75rem", marginTop: "0.2rem", color: row.msg.ok ? "var(--success)" : "var(--danger)" }}
+                          >
+                            {row.msg.text}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        {row.action === "restart" ? <span className="conn-badge loading">⟳ Reiniciando…</span>
+                          : row.action === "logout" ? <span className="conn-badge loading">⟳ Desconectando…</span>
+                          : row.action === "delete" ? <span className="conn-badge loading">⟳ Apagando…</span>
+                          : <StateChip state={state} />}
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", gap: "0.4rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                          {!isConnected && (
+                            <button
+                              type="button"
+                              className="btn-primary sm"
+                              onClick={() => setQrModal(name)}
+                              disabled={busy}
+                              title="Conectar via QR Code"
+                            >
+                              📱 Conectar
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn-secondary sm"
+                            onClick={() => handleRestart(name)}
+                            disabled={busy}
+                            title="Reiniciar instância"
+                          >
+                            {row.action === "restart"
+                              ? <span className="btn-loading"><span className="spinner dark" /></span>
+                              : "⟳ Reiniciar"}
+                          </button>
+                          {isConnected && (
+                            <button
+                              type="button"
+                              className="btn-secondary sm btn-danger-outline"
+                              onClick={() => setConfirmModal({ instanceName: name, action: "logout" })}
+                              disabled={busy}
+                              title="Desconectar WhatsApp"
+                            >
+                              {row.action === "logout"
+                                ? <span className="btn-loading"><span className="spinner dark" /></span>
+                                : "✕ Desconectar"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn-secondary sm btn-danger-outline"
+                            onClick={() => setConfirmModal({ instanceName: name, action: "delete" })}
+                            disabled={busy}
+                            title="Apagar instância permanentemente"
+                          >
+                            {row.action === "delete"
+                              ? <span className="btn-loading"><span className="spinner dark" /></span>
+                              : "🗑"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* ═══ MODALS ════════════════════════════════════════════ */}
+      {qrModal && (
+        <QRModal
+          instanceName={qrModal}
+          token={token}
+          onClose={() => setQrModal(null)}
+          onConnected={() => { setQrModal(null); loadInstances(); }}
+        />
+      )}
+
+      {createModal && (
+        <CreateModal
+          token={token}
+          onClose={() => setCreateModal(false)}
+          onCreated={handleCreated}
+        />
+      )}
+
+      {confirmModal && (
+        <ConfirmModal
+          message={
+            confirmModal.action === "delete"
+              ? `Apagar permanentemente a instância "${confirmModal.instanceName}" da Evolution API? Esta ação não pode ser desfeita.`
+              : `Desconectar o WhatsApp da instância "${confirmModal.instanceName}"?`
+          }
+          confirmLabel={confirmModal.action === "delete" ? "Apagar" : "Desconectar"}
+          danger={confirmModal.action === "delete"}
+          onConfirm={() =>
+            confirmModal.action === "delete"
+              ? confirmDelete(confirmModal.instanceName)
+              : confirmLogout(confirmModal.instanceName)
+          }
+          onCancel={() => setConfirmModal(null)}
+        />
       )}
     </AppShell>
   );

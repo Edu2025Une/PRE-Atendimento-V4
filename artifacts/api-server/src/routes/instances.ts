@@ -76,41 +76,53 @@ async function evoProxy(
   return { ok: response.ok, status: response.status, data };
 }
 
-// ── Get user's own instance ───────────────────────────────────
+// ── List ALL instances from Evolution API ─────────────────────
 router.get("/instances", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
   try {
-    const { ok, data } = await evoProxy(
-      `${cfg.url}/instance/connectionState/${cfg.instanceName}`,
+    const { ok, status, data } = await evoProxy(
+      `${cfg.url}/instance/fetchInstances`,
       cfg.apiKey,
       "GET",
       undefined,
-      10000,
+      12000,
     );
     if (!ok) {
-      res.json({ instances: [] });
+      const message = extractEvoMessage(data, status);
+      res.status(502).json({ message, instances: [] });
       return;
     }
-    const d = data as Record<string, unknown>;
-    const inst = d.instance as Record<string, unknown> | undefined;
-    const state = (inst?.state ?? inst?.status ?? d.state ?? "unknown") as string;
-    res.json({
-      instances: [{ instance: { instanceName: cfg.instanceName, state, connectionStatus: state } }],
+    // Evolution API returns an array directly
+    const instances = Array.isArray(data) ? data : [];
+    res.json({ instances });
+  } catch (err: unknown) {
+    req.log.error({ err }, "Erro ao listar instâncias");
+    const msg = err instanceof Error ? err.message : "Erro desconhecido";
+    const isTimeout = msg.includes("timeout") || msg.includes("Timeout");
+    res.status(502).json({
+      message: isTimeout
+        ? "Tempo esgotado. Verifique se a URL da Evolution API está acessível."
+        : `Falha ao listar instâncias: ${msg}`,
+      instances: [],
     });
-  } catch {
-    res.json({ instances: [] });
   }
 });
 
-// ── Create user's instance ────────────────────────────────────
+// ── Create a new instance ─────────────────────────────────────
 router.post("/instances", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
-  const instanceName = cfg.instanceName;
-  const integration = (req.body as { integration?: string }).integration ?? "WHATSAPP-BAILEYS";
+  const body = req.body as { instanceName?: string; integration?: string };
+  const instanceName = body.instanceName?.trim() || cfg.instanceName;
+  const integration = body.integration ?? "WHATSAPP-BAILEYS";
+
+  if (!instanceName) {
+    res.status(400).json({ message: "Nome da instância é obrigatório." });
+    return;
+  }
 
   try {
     const { ok, status, data } = await evoProxy(
@@ -139,11 +151,11 @@ router.post("/instances", async (req, res) => {
 });
 
 // ── Get instance connection status ────────────────────────────
-router.get("/instances/:any/status", async (req, res) => {
+router.get("/instances/:name/status", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
-  const instanceName = cfg.instanceName;
+  const instanceName = req.params.name;
   try {
     const { ok, status, data } = await evoProxy(
       `${cfg.url}/instance/connectionState/${instanceName}`,
@@ -171,11 +183,11 @@ router.get("/instances/:any/status", async (req, res) => {
 });
 
 // ── Get QR Code (connect) ─────────────────────────────────────
-router.get("/instances/:any/qrcode", async (req, res) => {
+router.get("/instances/:name/qrcode", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
-  const instanceName = cfg.instanceName;
+  const instanceName = req.params.name;
   try {
     const { ok, status, data } = await evoProxy(
       `${cfg.url}/instance/connect/${instanceName}`,
@@ -223,11 +235,11 @@ router.get("/instances/:any/qrcode", async (req, res) => {
 });
 
 // ── Logout / disconnect instance ──────────────────────────────
-router.delete("/instances/:any/logout", async (req, res) => {
+router.delete("/instances/:name/logout", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
-  const instanceName = cfg.instanceName;
+  const instanceName = req.params.name;
   try {
     const { ok, status, data } = await evoProxy(
       `${cfg.url}/instance/logout/${instanceName}`,
@@ -250,11 +262,11 @@ router.delete("/instances/:any/logout", async (req, res) => {
 });
 
 // ── Restart instance ──────────────────────────────────────────
-router.put("/instances/:any/restart", async (req, res) => {
+router.put("/instances/:name/restart", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
-  const instanceName = cfg.instanceName;
+  const instanceName = req.params.name;
   try {
     const { ok, status, data } = await evoProxy(
       `${cfg.url}/instance/restart/${instanceName}`,
@@ -277,12 +289,11 @@ router.put("/instances/:any/restart", async (req, res) => {
 });
 
 // ── Delete instance completely ────────────────────────────────
-// Tries /instance/delete/{name} first; if 404, falls back to /instance/{name}
-router.delete("/instances/:any", async (req, res) => {
+router.delete("/instances/:name", async (req, res) => {
   const cfg = await getUserCfg(req.jwtUser!.id, res);
   if (!cfg) return;
 
-  const instanceName = cfg.instanceName;
+  const instanceName = req.params.name;
   try {
     let result = await evoProxy(
       `${cfg.url}/instance/delete/${instanceName}`,
@@ -292,7 +303,6 @@ router.delete("/instances/:any", async (req, res) => {
       15000,
     );
 
-    // Some Evolution API versions use DELETE /instance/{name} directly
     if (!result.ok && result.status === 404) {
       result = await evoProxy(
         `${cfg.url}/instance/${instanceName}`,
@@ -303,7 +313,6 @@ router.delete("/instances/:any", async (req, res) => {
       );
     }
 
-    // 404 means it doesn't exist on the Evolution API — treat as already deleted
     if (!result.ok && result.status === 404) {
       res.json({ ok: true, message: "Instância removida (não existia na Evolution API)." });
       return;
